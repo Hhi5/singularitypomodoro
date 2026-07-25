@@ -9,8 +9,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::sync::{Arc, Mutex};
+#[cfg(any(windows, target_os = "macos", test))]
+use winit::dpi::PhysicalPosition;
 use winit::{
-    dpi::{PhysicalPosition, PhysicalSize, Position, Size},
+    dpi::{PhysicalSize, Position, Size},
     event::{ElementState, Event, KeyEvent, WindowEvent},
     event_loop::{ControlFlow, EventLoop, EventLoopWindowTarget},
     keyboard::{Key, NamedKey},
@@ -617,13 +619,20 @@ impl State {
         self.finish_panes(shells);
         self.update_roam_box();
         self.pinned_px = old_pin.map(|pin| {
-            remap_point(
-                pin,
-                old_roam_pos,
-                old_roam_size,
-                self.roam_pos,
-                self.roam_size,
-            )
+            // A pin that still lands inside the new box keeps its exact
+            // position, so shrinking the roam box never nudges a pin that was
+            // already valid. Only pins left outside get remapped.
+            if point_inside(pin, self.roam_pos, self.roam_size) {
+                pin
+            } else {
+                remap_point(
+                    pin,
+                    old_roam_pos,
+                    old_roam_size,
+                    self.roam_pos,
+                    self.roam_size,
+                )
+            }
         });
         self.center_px = self.pinned_px.unwrap_or([
             self.roam_pos[0] + self.roam_size[0] * 0.5,
@@ -1180,6 +1189,11 @@ fn lissa(t: f32) -> [f32; 2] {
     ]
 }
 
+/// Whether a point lies within a box (inclusive edges).
+fn point_inside(point: [f64; 2], pos: [f64; 2], size: [f64; 2]) -> bool {
+    (0..2).all(|i| point[i] >= pos[i] && point[i] <= pos[i] + size[i])
+}
+
 /// Preserve a point's relative position when its containing box changes.
 fn remap_point(
     point: [f64; 2],
@@ -1196,7 +1210,16 @@ fn remap_point(
 
 #[cfg(test)]
 mod pin_tests {
-    use super::remap_point;
+    use super::{point_inside, remap_point};
+
+    #[test]
+    fn keeps_pins_that_are_still_inside_the_new_box() {
+        // pinned mid-monitor-1 while both monitors were selected
+        let pin = [960.0, 540.0];
+        assert!(point_inside(pin, [0.0, 0.0], [1920.0, 1080.0]));
+        // and a pin left on monitor 2 is not
+        assert!(!point_inside([2880.0, 540.0], [0.0, 0.0], [1920.0, 1080.0]));
+    }
 
     #[test]
     fn remaps_and_clamps_points_between_monitor_boxes() {
@@ -1839,7 +1862,7 @@ fn main() {
                                 );
                             }
                             let result = clipboard_owner
-                                .ok_or_else(|| "screenshot: no owner window".to_string())
+                                .ok_or_else(|| "no owner window".to_string())
                                 .and_then(|owner| {
                                     screenshot_fix::try_fix(
                                         &state.device,
