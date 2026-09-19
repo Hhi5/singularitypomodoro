@@ -499,7 +499,7 @@ impl State {
             idle_minutes: 0.0,
             appear_start: None,
             pomodoro_work_minutes: 0.0,
-            pomodoro_break_minutes: 10.0,
+            pomodoro_break_minutes: 1.0,
             pomodoro_progress: 0.0,
             pomodoro_visual_size: 0.0,
             last_pomodoro_tick: std::time::Instant::now(),
@@ -750,14 +750,14 @@ impl State {
         let work_secs = self.pomodoro_work_minutes * 60.0;
 
         if idle_secs < 2.0 {
-            // Working: build up progress, but stay invisible until the last 10%
+            // Working: accumulate work progress
             self.pomodoro_progress += dt / work_secs;
             self.pomodoro_progress = self.pomodoro_progress.clamp(0.0, 1.0);
             
             let target_size = ((self.pomodoro_progress - 0.9) * 10.0).clamp(0.0, 1.0);
             self.pomodoro_visual_size += (target_size - self.pomodoro_visual_size) * (dt * 5.0).min(1.0);
         } else {
-            // Break: shrink both progress and visual size steadily over the entire break duration
+            // Break: shrink proportionally to the exact break duration selected
             self.pomodoro_progress -= dt / break_secs;
             self.pomodoro_progress = self.pomodoro_progress.clamp(0.0, 1.0);
             
@@ -1562,9 +1562,9 @@ const IDLE_OPTS: [(&str, f32); 4] = [("Off", 0.0), ("1 min", 1.0), ("5 min", 5.0
 #[cfg(any(windows, target_os = "macos"))]
 const SPIN_OPTS: [(&str, f32); 4] = [("Off", 0.0), ("Medium", 0.6), ("High", 0.9), ("Extreme", 0.98)];
 #[cfg(any(windows, target_os = "macos"))]
-const POMO_WORK_OPTS: [(&str, f32); 4] = [("Off", 0.0), ("25 min", 25.0), ("50 min", 50.0), ("90 min", 90.0)];
+const POMO_WORK_OPTS: [(&str, f32); 4] = [("Off", 0.0), ("1 min", 1.0), ("25 min", 25.0), ("50 min", 50.0)];
 #[cfg(any(windows, target_os = "macos"))]
-const POMO_BREAK_OPTS: [(&str, f32); 3] = [("5 min", 5.0), ("10 min", 10.0), ("15 min", 15.0)];
+const POMO_BREAK_OPTS: [(&str, f32); 3] = [("1 min", 1.0), ("5 min", 5.0), ("10 min", 10.0)];
 
 #[cfg(any(windows, target_os = "macos"))]
 struct Tray {
@@ -1606,7 +1606,6 @@ fn build_tray(monitor_labels: &[String], current_monitor: usize, pinned: bool, p
     }
     menu.append(&PredefinedMenuItem::separator()).unwrap();
     // stepped option submenus; default checked = Medium/Normal/Unlimited/Off
-    // Since default size is now Large (0.14), we pass 2 instead of 1 for Sizes
     let sub = |title: &str, names: &[&str], default: usize| -> Vec<CheckMenuItem> {
         let submenu = Submenu::new(title, true);
         let items: Vec<CheckMenuItem> = names
@@ -1620,7 +1619,7 @@ fn build_tray(monitor_labels: &[String], current_monitor: usize, pinned: bool, p
         menu.append(&submenu).unwrap();
         items
     };
-    let sizes = sub("Size", &SIZES.map(|s| s.0), 2);
+    let sizes = sub("Size", &SIZES.map(|s| s.0), 2); // Default Large
     let speeds = sub("Speed", &SPEEDS.map(|s| s.0), 1);
     let fps = sub("FPS", &FPS_OPTS.map(|s| s.0), 2);
     let idles = sub("Screensaver", &IDLE_OPTS.map(|s| s.0), 0);
@@ -2258,7 +2257,7 @@ fn main() {
                                         }
                                     }
                                     if cfg.pomodoro_break_minutes != prev_cfg.pomodoro_break_minutes {
-                                        state.pomodoro_break_minutes = cfg.pomodoro_break_minutes.unwrap_or(10.0);
+                                        state.pomodoro_break_minutes = cfg.pomodoro_break_minutes.unwrap_or(1.0);
                                         #[cfg(any(windows, target_os = "macos"))]
                                         if let Some(t) = &tray {
                                             let idx = POMO_BREAK_OPTS.iter().position(|o| o.1 == state.pomodoro_break_minutes).unwrap_or(POMO_BREAK_OPTS.len());
