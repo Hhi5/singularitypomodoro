@@ -90,7 +90,8 @@ pub struct Uniforms {
     pub _pad: [f32; 2],
 }
 
-const DEFAULT_SIZE: f32 = 0.09; // shadow radius, fraction of screen height
+// Default size set to Large (0.14)
+const DEFAULT_SIZE: f32 = 0.14; // shadow radius, fraction of screen height
 const DEFAULT_DRIFT_SPEED: f32 = 1.0;
 const DEFAULT_DRIFT_X: f32 = 0.20;
 const DEFAULT_DRIFT_Y: f32 = 0.14;
@@ -179,7 +180,7 @@ const DEFAULT_CONFIG: &str = "\
 
 # Shadow radius as a fraction of screen height.
 # Tray Small / Medium / Large = 0.06 / 0.09 / 0.14
-#size = 0.09
+#size = 0.14
 
 # Wander speed multiplier and horizontal/vertical range (0 to 0.5).
 #drift_speed = 1.0
@@ -194,7 +195,7 @@ const DEFAULT_CONFIG: &str = "\
 #idle_minutes = 0
 
 # Pomodoro mode: the hole appears in the last 10% of your work session.
-# Taking a real break (system idle time >= break_minutes) shrinks it back.
+# Taking a real break shrinks it back gradually over the entire break duration.
 # 0 = off (default). (You can also change this from the tray menu).
 #pomodoro_work_minutes = 0
 #pomodoro_break_minutes = 10
@@ -301,6 +302,7 @@ struct State {
     pomodoro_work_minutes: f32,
     pomodoro_break_minutes: f32,
     pomodoro_progress: f32,
+    pomodoro_visual_size: f32,
     last_pomodoro_tick: std::time::Instant,
     drift_phase: f32,
 
@@ -499,6 +501,7 @@ impl State {
             pomodoro_work_minutes: 0.0,
             pomodoro_break_minutes: 10.0,
             pomodoro_progress: 0.0,
+            pomodoro_visual_size: 0.0,
             last_pomodoro_tick: std::time::Instant::now(),
             drift_phase: 0.0,
             roam_pos: [0.0, 0.0],
@@ -734,6 +737,7 @@ impl State {
     fn tick_pomodoro(&mut self, idle_secs: f32) {
         if self.pomodoro_work_minutes <= 0.0 {
             self.pomodoro_progress = 1.0;
+            self.pomodoro_visual_size = 1.0;
             self.last_pomodoro_tick = std::time::Instant::now();
             return;
         }
@@ -745,15 +749,21 @@ impl State {
         let break_secs = self.pomodoro_break_minutes * 60.0;
         let work_secs = self.pomodoro_work_minutes * 60.0;
 
-        if idle_secs >= break_secs {
-            // Break reached! Shrink smoothly over 5 seconds
-            self.pomodoro_progress -= dt / 5.0;
-        } else {
-            // Working (or short idle). Grow smoothly over work_secs.
+        if idle_secs < 2.0 {
+            // Working: build up progress, but stay invisible until the last 10%
             self.pomodoro_progress += dt / work_secs;
+            self.pomodoro_progress = self.pomodoro_progress.clamp(0.0, 1.0);
+            
+            let target_size = ((self.pomodoro_progress - 0.9) * 10.0).clamp(0.0, 1.0);
+            self.pomodoro_visual_size += (target_size - self.pomodoro_visual_size) * (dt * 5.0).min(1.0);
+        } else {
+            // Break: shrink both progress and visual size steadily over the entire break duration
+            self.pomodoro_progress -= dt / break_secs;
+            self.pomodoro_progress = self.pomodoro_progress.clamp(0.0, 1.0);
+            
+            self.pomodoro_visual_size -= dt / break_secs;
+            self.pomodoro_visual_size = self.pomodoro_visual_size.clamp(0.0, 1.0);
         }
-        
-        self.pomodoro_progress = self.pomodoro_progress.clamp(0.0, 1.0);
     }
 
     /// Advance the hole centre: follow the cursor while the placement hotkey
@@ -765,9 +775,7 @@ impl State {
         self.last_center_tick = now;
 
         let p_factor = if self.pomodoro_work_minutes > 0.0 {
-            // يظهر بالكامل فقط في آخر 10% من الوقت
-            let mapped = (self.pomodoro_progress - 0.9) * 10.0;
-            mapped.clamp(0.0, 1.0)
+            self.pomodoro_visual_size
         } else {
             1.0
         };
@@ -917,8 +925,7 @@ impl State {
         let pane = &self.panes[i];
         
         let p_factor = if self.pomodoro_work_minutes > 0.0 {
-            let mapped = (self.pomodoro_progress - 0.9) * 10.0;
-            mapped.clamp(0.0, 1.0)
+            self.pomodoro_visual_size
         } else {
             1.0
         };
@@ -1599,6 +1606,7 @@ fn build_tray(monitor_labels: &[String], current_monitor: usize, pinned: bool, p
     }
     menu.append(&PredefinedMenuItem::separator()).unwrap();
     // stepped option submenus; default checked = Medium/Normal/Unlimited/Off
+    // Since default size is now Large (0.14), we pass 2 instead of 1 for Sizes
     let sub = |title: &str, names: &[&str], default: usize| -> Vec<CheckMenuItem> {
         let submenu = Submenu::new(title, true);
         let items: Vec<CheckMenuItem> = names
@@ -1612,7 +1620,7 @@ fn build_tray(monitor_labels: &[String], current_monitor: usize, pinned: bool, p
         menu.append(&submenu).unwrap();
         items
     };
-    let sizes = sub("Size", &SIZES.map(|s| s.0), 1);
+    let sizes = sub("Size", &SIZES.map(|s| s.0), 2);
     let speeds = sub("Speed", &SPEEDS.map(|s| s.0), 1);
     let fps = sub("FPS", &FPS_OPTS.map(|s| s.0), 2);
     let idles = sub("Screensaver", &IDLE_OPTS.map(|s| s.0), 0);
@@ -1843,6 +1851,7 @@ fn main() {
                 UserEvent::CustomPomodoroWork(val) => {
                     state.pomodoro_work_minutes = val;
                     state.pomodoro_progress = 0.0;
+                    state.pomodoro_visual_size = 0.0;
                     #[cfg(any(windows, target_os = "macos"))]
                     if let Some(t) = &tray {
                         let idx = POMO_WORK_OPTS.iter().position(|o| o.1 == val).unwrap_or(POMO_WORK_OPTS.len());
@@ -1943,7 +1952,13 @@ fn main() {
                 // wanted:  always, or only after idle_minutes without input
                 let waited = state.start.elapsed().as_secs_f32();
                 let idle_mode = state.idle_minutes > 0.0;
-                let wanted = !idle_mode || idle_secs >= state.idle_minutes * 60.0;
+                let mut wanted = !idle_mode || idle_secs >= state.idle_minutes * 60.0;
+                
+                // إخفاء النافذة بالكامل وإيقاف الرندر إذا جان البومودورو شغال وبعدنا ما واصلين لآخر 10%
+                if state.pomodoro_work_minutes > 0.0 {
+                    wanted = wanted && (state.pomodoro_visual_size > 0.005);
+                }
+
                 let any_visible = state.panes.iter().any(|p| p.visible);
                 for i in 0..state.panes.len() {
                     let ready = { state.panes[i].shared.lock().unwrap().width > 0 };
@@ -2147,6 +2162,7 @@ fn main() {
                             if idx < POMO_WORK_OPTS.len() {
                                 state.pomodoro_work_minutes = POMO_WORK_OPTS[idx].1;
                                 state.pomodoro_progress = 0.0;
+                                state.pomodoro_visual_size = 0.0;
                                 check_one(&t.pomo_works, idx);
                             } else {
                                 let proxy = event_loop_proxy.clone();
@@ -2232,6 +2248,7 @@ fn main() {
                                     if cfg.pomodoro_work_minutes != prev_cfg.pomodoro_work_minutes {
                                         state.pomodoro_work_minutes = cfg.pomodoro_work_minutes.unwrap_or(0.0);
                                         state.pomodoro_progress = 0.0;
+                                        state.pomodoro_visual_size = 0.0;
                                         #[cfg(any(windows, target_os = "macos"))]
                                         if let Some(t) = &tray {
                                             let idx = POMO_WORK_OPTS.iter().position(|o| o.1 == state.pomodoro_work_minutes).unwrap_or(POMO_WORK_OPTS.len());
