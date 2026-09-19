@@ -14,7 +14,7 @@ use winit::dpi::PhysicalPosition;
 use winit::{
     dpi::{PhysicalSize, Position, Size},
     event::{ElementState, Event, KeyEvent, WindowEvent},
-    event_loop::{ControlFlow, EventLoop, EventLoopWindowTarget},
+    event_loop::{ControlFlow, EventLoopWindowTarget},
     keyboard::{Key, NamedKey},
     monitor::MonitorHandle,
     window::{Window, WindowBuilder, WindowLevel},
@@ -33,6 +33,12 @@ mod screenshot_fix;
 
 /// Number of shared GPU textures in the zero-copy ring (Windows).
 pub const GPU_BUFFERS: usize = 3;
+
+#[derive(Debug, Clone, Copy)]
+pub enum UserEvent {
+    CustomPomodoroWork(f32),
+    CustomPomodoroBreak(f32),
+}
 
 // Platform-neutral shared frame state, filled by the capture thread and read
 // by the render loop. Two delivery modes: CPU (data holds the frame bytes)
@@ -187,9 +193,9 @@ const DEFAULT_CONFIG: &str = "\
 # keyboard/mouse input, and vanish on the first input. 0 = always visible.
 #idle_minutes = 0
 
-# Pomodoro mode: the hole starts small and grows to full size over your work session.
-# Taking a real break (system idle time >= break_minutes) shrinks it back to the seed.
-# 0 = off (default).
+# Pomodoro mode: the hole appears in the last 10% of your work session.
+# Taking a real break (system idle time >= break_minutes) shrinks it back.
+# 0 = off (default). (You can also change this from the tray menu).
 #pomodoro_work_minutes = 0
 #pomodoro_break_minutes = 10
 
@@ -310,7 +316,7 @@ struct State {
 
 impl State {
     async fn new(
-        target: &EventLoopWindowTarget<()>,
+        target: &EventLoopWindowTarget<UserEvent>,
         monitors: &[winit::monitor::MonitorHandle],
         selection: Option<usize>, // None = every monitor
     ) -> State {
@@ -626,7 +632,7 @@ impl State {
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     fn set_selection(
         &mut self,
-        target: &EventLoopWindowTarget<()>,
+        target: &EventLoopWindowTarget<UserEvent>,
         monitors: &[winit::monitor::MonitorHandle],
         selection: Option<usize>,
     ) {
@@ -759,11 +765,13 @@ impl State {
         self.last_center_tick = now;
 
         let p_factor = if self.pomodoro_work_minutes > 0.0 {
-            0.1 + 0.9 * self.pomodoro_progress
+            // يظهر بالكامل فقط في آخر 10% من الوقت
+            let mapped = (self.pomodoro_progress - 0.9) * 10.0;
+            mapped.clamp(0.0, 1.0)
         } else {
             1.0
         };
-        let current_drift_speed = self.drift_speed * p_factor;
+        let current_drift_speed = self.drift_speed * (0.1 + 0.9 * p_factor);
 
         if place_hotkey_held() {
             if let Some(p) = self.cursor_px() {
@@ -909,7 +917,8 @@ impl State {
         let pane = &self.panes[i];
         
         let p_factor = if self.pomodoro_work_minutes > 0.0 {
-            0.1 + 0.9 * self.pomodoro_progress
+            let mapped = (self.pomodoro_progress - 0.9) * 10.0;
+            mapped.clamp(0.0, 1.0)
         } else {
             1.0
         };
@@ -1037,7 +1046,7 @@ fn monitor_desktop_rect(monitor: &MonitorHandle) -> DesktopRect {
 /// examples/dx12_probe.rs), while a manually monitor-sized window works.
 fn make_shells(
     instance: &wgpu::Instance,
-    target: &EventLoopWindowTarget<()>,
+    target: &EventLoopWindowTarget<UserEvent>,
     monitors: &[winit::monitor::MonitorHandle],
     selection: Option<usize>,
 ) -> Vec<Shell> {
@@ -1476,6 +1485,41 @@ fn idle_seconds() -> f32 {
     0.0
 }
 
+#[cfg(windows)]
+fn prompt_custom_time(title: &str, default: &str) -> Option<f32> {
+    use std::os::windows::process::CommandExt;
+    let script = format!(
+        "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.Interaction]::InputBox('Enter minutes:', '{}', '{}')",
+        title, default
+    );
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&output.stdout);
+    s.trim().parse().ok()
+}
+
+#[cfg(target_os = "macos")]
+fn prompt_custom_time(title: &str, default: &str) -> Option<f32> {
+    let script = format!(
+        "text returned of (display dialog \"Enter minutes:\" with title \"{}\" default answer \"{}\")",
+        title, default
+    );
+    let output = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&output.stdout);
+    s.trim().parse().ok()
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn prompt_custom_time(_title: &str, _default: &str) -> Option<f32> {
+    None
+}
+
 /// Programmatic tray icon: a black hole - dark disc with a warm ring.
 #[cfg(any(windows, target_os = "macos"))]
 fn tray_icon_rgba(size: u32) -> Vec<u8> {
@@ -1507,11 +1551,13 @@ const SPEEDS: [(&str, f32); 3] = [("Slow", 0.4), ("Normal", 1.0), ("Fast", 2.2)]
 #[cfg(any(windows, target_os = "macos"))]
 const FPS_OPTS: [(&str, u32); 3] = [("30", 30), ("60", 60), ("Unlimited", 0)];
 #[cfg(any(windows, target_os = "macos"))]
-const IDLE_OPTS: [(&str, f32); 4] =
-    [("Off", 0.0), ("1 min", 1.0), ("5 min", 5.0), ("10 min", 10.0)];
+const IDLE_OPTS: [(&str, f32); 4] = [("Off", 0.0), ("1 min", 1.0), ("5 min", 5.0), ("10 min", 10.0)];
 #[cfg(any(windows, target_os = "macos"))]
-const SPIN_OPTS: [(&str, f32); 4] =
-    [("Off", 0.0), ("Medium", 0.6), ("High", 0.9), ("Extreme", 0.98)];
+const SPIN_OPTS: [(&str, f32); 4] = [("Off", 0.0), ("Medium", 0.6), ("High", 0.9), ("Extreme", 0.98)];
+#[cfg(any(windows, target_os = "macos"))]
+const POMO_WORK_OPTS: [(&str, f32); 4] = [("Off", 0.0), ("25 min", 25.0), ("50 min", 50.0), ("90 min", 90.0)];
+#[cfg(any(windows, target_os = "macos"))]
+const POMO_BREAK_OPTS: [(&str, f32); 3] = [("5 min", 5.0), ("10 min", 10.0), ("15 min", 15.0)];
 
 #[cfg(any(windows, target_os = "macos"))]
 struct Tray {
@@ -1525,6 +1571,8 @@ struct Tray {
     spins: Vec<tray_icon::menu::CheckMenuItem>,
     positions: Vec<tray_icon::menu::CheckMenuItem>,
     monitors: Vec<tray_icon::menu::CheckMenuItem>,
+    pomo_works: Vec<tray_icon::menu::CheckMenuItem>,
+    pomo_breaks: Vec<tray_icon::menu::CheckMenuItem>,
     open_cfg_id: tray_icon::menu::MenuId,
     quit_id: tray_icon::menu::MenuId,
 }
@@ -1537,7 +1585,7 @@ struct Tray {
 /// AppKit with NSCGSPanic (confirmed on Monterey), and winit only sets up
 /// NSApplication when the loop runs.
 #[cfg(any(windows, target_os = "macos"))]
-fn build_tray(monitor_labels: &[String], current_monitor: usize, pinned: bool) -> Tray {
+fn build_tray(monitor_labels: &[String], current_monitor: usize, pinned: bool, pomo_work_idx: usize, pomo_break_idx: usize) -> Tray {
     use tray_icon::{
         menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
         Icon, TrayIconBuilder,
@@ -1580,6 +1628,15 @@ fn build_tray(monitor_labels: &[String], current_monitor: usize, pinned: bool) -
     } else {
         Vec::new()
     };
+    
+    let mut work_names: Vec<&str> = POMO_WORK_OPTS.iter().map(|s| s.0).collect();
+    work_names.push("Custom...");
+    let pomo_works = sub("Pomodoro Work", &work_names, pomo_work_idx);
+
+    let mut break_names: Vec<&str> = POMO_BREAK_OPTS.iter().map(|s| s.0).collect();
+    break_names.push("Custom...");
+    let pomo_breaks = sub("Pomodoro Break", &break_names, pomo_break_idx);
+
     menu.append(&PredefinedMenuItem::separator()).unwrap();
     let open_cfg = MenuItem::new("Open Config File", true, None);
     menu.append(&open_cfg).unwrap();
@@ -1603,6 +1660,8 @@ fn build_tray(monitor_labels: &[String], current_monitor: usize, pinned: bool) -
         spins,
         positions,
         monitors,
+        pomo_works,
+        pomo_breaks,
         open_cfg_id: open_cfg.id().clone(),
         quit_id: quit.id().clone(),
     }
@@ -1665,7 +1724,9 @@ fn main() {
     let mut next_frame = std::time::Instant::now();
     let mut boot_warned = false;
 
-    let event_loop = EventLoop::new().unwrap();
+    let event_loop = winit::event_loop::EventLoopBuilder::<UserEvent>::with_user_event().build().unwrap();
+    let event_loop_proxy = event_loop.create_proxy();
+    
     let monitors: Vec<_> = event_loop.available_monitors().collect();
 
     // monitor selection: 0 or absent = all monitors (the hole roams across
@@ -1778,6 +1839,29 @@ fn main() {
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop
         .run(move |event, elwt| match event {
+            Event::UserEvent(ev) => match ev {
+                UserEvent::CustomPomodoroWork(val) => {
+                    state.pomodoro_work_minutes = val;
+                    state.pomodoro_progress = 0.0;
+                    #[cfg(any(windows, target_os = "macos"))]
+                    if let Some(t) = &tray {
+                        let idx = POMO_WORK_OPTS.iter().position(|o| o.1 == val).unwrap_or(POMO_WORK_OPTS.len());
+                        for (j, it) in t.pomo_works.iter().enumerate() {
+                            it.set_checked(j == idx);
+                        }
+                    }
+                }
+                UserEvent::CustomPomodoroBreak(val) => {
+                    state.pomodoro_break_minutes = val;
+                    #[cfg(any(windows, target_os = "macos"))]
+                    if let Some(t) = &tray {
+                        let idx = POMO_BREAK_OPTS.iter().position(|o| o.1 == val).unwrap_or(POMO_BREAK_OPTS.len());
+                        for (j, it) in t.pomo_breaks.iter().enumerate() {
+                            it.set_checked(j == idx);
+                        }
+                    }
+                }
+            },
             // NSStatusItem must be created after NSApplication is running on
             // macOS; StartCause::Init is the first moment that is true.
             Event::NewEvents(winit::event::StartCause::Init) => {
@@ -1791,7 +1875,11 @@ fn main() {
                         None => 0,
                         Some(i) => i + 1,
                     };
-                    tray = Some(build_tray(&labels, checked, state.pinned_px.is_some()));
+                    
+                    let pw_idx = POMO_WORK_OPTS.iter().position(|o| o.1 == state.pomodoro_work_minutes).unwrap_or(POMO_WORK_OPTS.len());
+                    let pb_idx = POMO_BREAK_OPTS.iter().position(|o| o.1 == state.pomodoro_break_minutes).unwrap_or(POMO_BREAK_OPTS.len());
+                    
+                    tray = Some(build_tray(&labels, checked, state.pinned_px.is_some(), pw_idx, pb_idx));
                 }
             }
             Event::WindowEvent { event, window_id } => {
@@ -2055,6 +2143,33 @@ fn main() {
                                 current_sel = sel;
                             }
                             check_one(&t.monitors, idx);
+                        } else if let Some(idx) = t.pomo_works.iter().position(|it| it.id() == &ev.id) {
+                            if idx < POMO_WORK_OPTS.len() {
+                                state.pomodoro_work_minutes = POMO_WORK_OPTS[idx].1;
+                                state.pomodoro_progress = 0.0;
+                                check_one(&t.pomo_works, idx);
+                            } else {
+                                let proxy = event_loop_proxy.clone();
+                                let current = state.pomodoro_work_minutes.to_string();
+                                std::thread::spawn(move || {
+                                    if let Some(val) = prompt_custom_time("Pomodoro Work (minutes)", &current) {
+                                        let _ = proxy.send_event(UserEvent::CustomPomodoroWork(val));
+                                    }
+                                });
+                            }
+                        } else if let Some(idx) = t.pomo_breaks.iter().position(|it| it.id() == &ev.id) {
+                            if idx < POMO_BREAK_OPTS.len() {
+                                state.pomodoro_break_minutes = POMO_BREAK_OPTS[idx].1;
+                                check_one(&t.pomo_breaks, idx);
+                            } else {
+                                let proxy = event_loop_proxy.clone();
+                                let current = state.pomodoro_break_minutes.to_string();
+                                std::thread::spawn(move || {
+                                    if let Some(val) = prompt_custom_time("Pomodoro Break (minutes)", &current) {
+                                        let _ = proxy.send_event(UserEvent::CustomPomodoroBreak(val));
+                                    }
+                                });
+                            }
                         }
                     }
                     // placement hotkey pins the hole; mirror that in the menu
@@ -2116,9 +2231,24 @@ fn main() {
                                     }
                                     if cfg.pomodoro_work_minutes != prev_cfg.pomodoro_work_minutes {
                                         state.pomodoro_work_minutes = cfg.pomodoro_work_minutes.unwrap_or(0.0);
+                                        state.pomodoro_progress = 0.0;
+                                        #[cfg(any(windows, target_os = "macos"))]
+                                        if let Some(t) = &tray {
+                                            let idx = POMO_WORK_OPTS.iter().position(|o| o.1 == state.pomodoro_work_minutes).unwrap_or(POMO_WORK_OPTS.len());
+                                            for (j, it) in t.pomo_works.iter().enumerate() {
+                                                it.set_checked(j == idx);
+                                            }
+                                        }
                                     }
                                     if cfg.pomodoro_break_minutes != prev_cfg.pomodoro_break_minutes {
                                         state.pomodoro_break_minutes = cfg.pomodoro_break_minutes.unwrap_or(10.0);
+                                        #[cfg(any(windows, target_os = "macos"))]
+                                        if let Some(t) = &tray {
+                                            let idx = POMO_BREAK_OPTS.iter().position(|o| o.1 == state.pomodoro_break_minutes).unwrap_or(POMO_BREAK_OPTS.len());
+                                            for (j, it) in t.pomo_breaks.iter().enumerate() {
+                                                it.set_checked(j == idx);
+                                            }
+                                        }
                                     }
                                     if cfg.pin_x != prev_cfg.pin_x || cfg.pin_y != prev_cfg.pin_y
                                     {
