@@ -73,7 +73,6 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
 // ---------------------------------------------------------------- tunables --
 // Disk look, size and centre come from the uniforms (tray menu / config
 // file / placement hotkey); only the hole-independent knobs stay compile-time.
-const LENS_DEPTH: f32    = 13.0;   // hole-to-sky-plane distance in r_s - bigger = bends harder
 const N_STEPS: i32       = 48;     // geodesic steps per pixel (perf dial)
 const B_CRIT: f32        = 2.5980762; // critical impact parameter, r_s
 
@@ -279,6 +278,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let rin  = max(u.inner, 1.6);
     let rout = max(u.outer, rin + 0.5);
     let rh   = u.hole_radius;            // shadow radius in screen units
+    
+    // Dynamic lens depth to keep background magnification constant
+    // inversely scales the distance to the sky plane based on hole radius squared
+    let LENS_DEPTH = clamp(0.1053 / max(rh * rh, 0.0001), 2.0, 50.0);
 
     // hole centre computed on the CPU (drift / pinned / follow-the-cursor)
     let center = vec2<f32>(u.center_x, u.center_y);
